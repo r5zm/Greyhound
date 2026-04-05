@@ -39,37 +39,31 @@ void CoDXModelBonesHelper::ReadXModelBones(const std::unique_ptr<XModel_t>& Mode
             }
         }
 
-        // Check if we have parent ids yet
+        int32_t rawParent = -1;
+
         if (i >= Model->RootBoneCount)
         {
-            // Calculate parent table index
             size_t ParentIDIndex = i - Model->RootBoneCount;
 
-            // We have a parent id to read
             switch (Model->BoneParentSize)
             {
-            case 1: NewBone.BoneParent = (int32_t)CoDAssets::GameInstance->Read<uint8_t>(Model->BoneParentsPtr + ParentIDIndex); break;
-            case 2: NewBone.BoneParent = (int32_t)CoDAssets::GameInstance->Read<uint16_t>(Model->BoneParentsPtr + ParentIDIndex * sizeof(uint16_t)); break;
-            case 4: NewBone.BoneParent = (int32_t)CoDAssets::GameInstance->Read<uint32_t>(Model->BoneParentsPtr + ParentIDIndex * sizeof(uint32_t)); break;
+            case 1: rawParent = (int32_t)CoDAssets::GameInstance->Read<uint8_t>(Model->BoneParentsPtr + ParentIDIndex); break;
+            case 2: rawParent = (int32_t)CoDAssets::GameInstance->Read<uint16_t>(Model->BoneParentsPtr + ParentIDIndex * sizeof(uint16_t)); break;
+            case 4: rawParent = (int32_t)CoDAssets::GameInstance->Read<uint32_t>(Model->BoneParentsPtr + ParentIDIndex * sizeof(uint32_t)); break;
             }
 
-            // Check if we're cosmetic bones
             if (i < Model->BoneCount)
-            {
-                // Subtract position
-                NewBone.BoneParent = (i - NewBone.BoneParent);
-            }
+                NewBone.BoneParent = (int32_t)(i - rawParent);
             else
-            {
-                // Absolute position
                 NewBone.IsCosmetic = true;
-            }
         }
         else
         {
-            // Root
             NewBone.BoneParent = -1;
         }
+
+        printf("bone=%zu name=%s rootCount=%zu rawParent=%d finalParent=%d\n",
+            i, NewBone.TagName.c_str(), (size_t)Model->RootBoneCount, rawParent, NewBone.BoneParent);
 
         // Read global data
         auto GlobalData = CoDAssets::GameInstance->Read<DObjAnimMat>(Model->BaseMatriciesPtr + i * sizeof(DObjAnimMat));
@@ -89,6 +83,14 @@ void CoDXModelBonesHelper::ReadXModelBones(const std::unique_ptr<XModel_t>& Mode
         NewBone.BoneParent = -1;
     }
 
+    for (size_t i = 0; i < ResultModel->Bones.size(); i++)
+    {
+        auto& b = ResultModel->Bones[i];
+
+        printf("PRE-LOCAL Bone %zu (%s)\n", i, b.TagName.c_str());
+        printf("  parent = %d\n", b.BoneParent);
+        printf("  global pos = %f %f %f\n", b.GlobalPosition.X, b.GlobalPosition.Y, b.GlobalPosition.Z);
+    }
     // Generate locals
     ResultModel->GenerateLocalPositions(true, true);
 }

@@ -24,6 +24,7 @@ private:
     // -- Event delegates
 
     void OnExportSEAnim();
+    void OnExportSMD();
     void OnExportDirect();
     void OnExportCast();
     void OnSkipPrevAnim();

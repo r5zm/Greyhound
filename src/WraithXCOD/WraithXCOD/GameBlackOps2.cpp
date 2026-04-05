@@ -527,17 +527,22 @@ const XMaterial_t GameBlackOps2::ReadXMaterial(uint64_t MaterialPointer)
 
 std::unique_ptr<XImageDDS> GameBlackOps2::LoadXImage(const XImage_t& Image)
 {
-    // Prepare to load an image, we only support IPAK images from the image cache
+    // Prepare to load an image from the BO2 IPAK cache.
     uint32_t ResultSize = 0;
 
     // We must read the image data
     auto ImageInfo = CoDAssets::GameInstance->Read<BO2GfxImage>(Image.ImagePtr);
+    auto ImageKey = (((uint64_t)ImageInfo.KeyUpper) << 32) | ImageInfo.KeyLower;
 
-    // Check if the image isn't streamed, if it isn't, just exit
-    if (ImageInfo.Streamed <= 0) { return nullptr; }
+    // Older BO2 materials can still reference IPAK-backed textures even when
+    // the streamed flag is cleared, so only reject images when we truly have no key.
+    if (ImageKey == 0)
+    {
+        return nullptr;
+    }
 
-    // Attempt to load it (The key is actually the upper and lower half combined, as a single uint64_t)
-    auto ImageData = CoDAssets::GamePackageCache->ExtractPackageObject((((uint64_t)ImageInfo.KeyUpper) << 32 | ImageInfo.KeyLower), ResultSize);
+    // Attempt to load it. The key is the upper and lower halves combined into a single uint64_t.
+    auto ImageData = CoDAssets::GamePackageCache->ExtractPackageObject(ImageKey, ResultSize);
 
     // Check
     if (ImageData != nullptr)

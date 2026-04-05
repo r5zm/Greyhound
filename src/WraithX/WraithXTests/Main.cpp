@@ -290,10 +290,11 @@ int main(int argc, char** argv)
 		TextReadTest->Open("Tests/TextRead.txt");
 
 		// Read the line
-		auto Offset = TextReadTest->ReadLine();
+		bool ReadSuccess = false;
+		auto Offset = TextReadTest->ReadLine(ReadSuccess);
 
 		// Validate
-		ASSERT_PRNT(Offset == "Hello there!");
+		ASSERT_PRNT(ReadSuccess && Offset == "Hello there!");
 	}
 
 #pragma endregion
@@ -309,8 +310,9 @@ int main(int argc, char** argv)
 		TextReadTest->Open("Tests/TextRead.txt");
 
 		// Skip two lines
-		TextReadTest->ReadLine();
-		TextReadTest->ReadLine();
+		bool ReadSuccess = false;
+		TextReadTest->ReadLine(ReadSuccess);
+		TextReadTest->ReadLine(ReadSuccess);
 
 		float F1 = 0, F2 = 0, F3 = 0;
 		int I1 = 0;
@@ -1365,7 +1367,7 @@ int main(int argc, char** argv)
 	// SMD write test
 #pragma region SMD write test
 
-	printf(":  [50]\t\tSMD write test... ");
+	printf(":  [50]\t\tSMD write tests... ");
 	{
 		// Make it
 		WraithModel Model;
@@ -1490,9 +1492,55 @@ int main(int argc, char** argv)
 		ValveSMD::ExportSMD(Model, "Tests/SMDCube.smd");
 
 		auto Result = Hashing::HashSHA1File("Tests/SMDCube.smd");
+		std::shared_ptr<TextReader> SMDCubeQCRead = std::make_shared<TextReader>();
+		SMDCubeQCRead->Open("Tests/SMDCube.qc");
+		auto ResultQC = SMDCubeQCRead->ReadToEnd();
+		SMDCubeQCRead->Close();
+
+		WraithModel AnimModel;
+		{
+			auto& RootBone = AnimModel.AddBone();
+			RootBone.TagName = "bone0";
+			RootBone.BoneParent = -1;
+			RootBone.LocalPosition = Vector3(100.0f, 100.0f, 100.0f);
+			RootBone.LocalRotation = Quaternion::Identity();
+
+			auto& ChildBone = AnimModel.AddBone();
+			ChildBone.TagName = "bone1";
+			ChildBone.BoneParent = 0;
+			ChildBone.LocalPosition = Vector3(10.0f, 0.0f, 0.0f);
+			ChildBone.LocalRotation = Quaternion::Identity();
+		}
+
+		AnimModel.GenerateGlobalPositions(true, true);
+
+		WraithAnim Animation;
+		Animation.AddTranslationKey("bone0", 0, 0.0f, 0.0f, 0.0f);
+		Animation.AddTranslationKey("bone0", 2, 100.0f, 100.0f, 100.0f);
+		Animation.AddRotationKey("bone0", 0, 0.0f, 0.0f, 0.0f, 1.0f);
+		Animation.AddRotationKey("bone0", 2, 0.0f, 0.0f, 0.70710677f, 0.70710677f);
+		Animation.AddRotationKey("bone1", 0, 0.0f, 0.0f, 0.0f, 1.0f);
+		Animation.AddTranslationKey("bone1", 1, 4.0f, 5.0f, 6.0f);
+		Animation.AnimType = WraithAnimationType::Relative;
+
+		ValveSMD::ExportSMD(Animation, AnimModel, "Tests/SMDAnim.smd");
+
+		std::shared_ptr<TextReader> SMDAnimRead = std::make_shared<TextReader>();
+		SMDAnimRead->Open("Tests/SMDAnim.smd");
+		auto ResultAnim = SMDAnimRead->ReadToEnd();
+		SMDAnimRead->Close();
+
+		auto HasChildParent = ResultAnim.find("1 \"bone1\" 0") != std::string::npos;
+		auto MissingChildRoot = ResultAnim.find("1 \"bone1\" -1") == std::string::npos;
+		auto HasBindRootAtFrame0 = ResultAnim.find("0 100.000000 100.000000 100.000000") != std::string::npos;
+		auto HasAnimatedRootAtFrame2 = ResultAnim.find("0 200.000000 200.000000 200.000000") != std::string::npos;
+		auto HasAnimatedChildOffset = ResultAnim.find("1 14.000000 5.000000 6.000000 0.000000 0.000000 0.000000") != std::string::npos;
+		auto HasModelName = ResultQC.find("$modelname \"SMDCube.mdl\"") != std::string::npos;
+		auto HasBodyStudio = ResultQC.find("$body studio \"SMDCube.smd\"") != std::string::npos;
+		auto HasSequenceIdle = ResultQC.find("$sequence idle \"SMDCube.smd\" fps 30") != std::string::npos;
 
 		// Validate
-		ASSERT_PRNT(Result == "a56550d5c88415a8fe9986a34d8ecd70b7b80202");
+		ASSERT_PRNT(Result == "a56550d5c88415a8fe9986a34d8ecd70b7b80202" && HasModelName && HasBodyStudio && HasSequenceIdle && HasChildParent && MissingChildRoot && HasBindRootAtFrame0 && HasAnimatedRootAtFrame2 && HasAnimatedChildOffset);
 	}
 
 #pragma endregion

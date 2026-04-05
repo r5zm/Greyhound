@@ -2,6 +2,7 @@
 #include "CoDCDNCache.h"
 #include "CoDFileSystem.h"
 #include "WebClient.h"
+#include <chrono>
 #include <shared_mutex>
 
 class CoDCDNDownloader

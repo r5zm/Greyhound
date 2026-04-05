@@ -134,6 +134,7 @@ FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
     LTEXT           "Anim export formats",IDC_TITLE,8,10,156,20
     CONTROL         "Export .SEANIM",IDC_EXPORTSEANIM,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,17,32,109,11
+    CONTROL         "Export .SMD (Valve)",IDC_EXPORTSMD,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,17,111,109,11
     CONTROL         "Export 'Direct XAnims' (Modtools)",IDC_EXPORTDIRECTX,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,17,48,139,11
     LTEXT           "Tip: SEAnims require a plugin to load, you can get it from the Github Repo",IDC_TIP,17,198,312,8
@@ -451,4 +452,3 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
-

@@ -237,51 +237,50 @@ std::unique_ptr<WraithModel> CoDXModelTranslator::TranslateXModel(const std::uni
     // Grab reference to the lod we want to translate
     auto& LodReference = Model->ModelLods[LodIndex];
 
-    // A list of unique material names
-    std::map<std::string, uint32_t> UniqueMaterials;
+    // Track duplicate material names so exports that key off the material token
+    // keep a stable one-to-one mapping between COD submeshes and exported materials.
+    std::map<std::string, uint32_t> MaterialNameCounts;
 
-    // Build unique material references (Right now, it's one material per submesh)
+    // Build material references (one exported material per COD submesh)
     for (uint32_t i = 0; i < (uint32_t)LodReference.Materials.size(); i++)
     {
-        // Check if it exists
-        auto FindResult = UniqueMaterials.find(LodReference.Materials[i].MaterialName);
-        // Check if we have one
-        if (FindResult != UniqueMaterials.end())
+        // Add it
+        auto& NewMat = ModelResult->AddMaterial();
+        // Assign values
+        auto MaterialBaseName = Strings::Replace(LodReference.Materials[i].MaterialName, "@", "_");
+        auto MaterialCountEntry = MaterialNameCounts.find(MaterialBaseName);
+
+        if (MaterialCountEntry == MaterialNameCounts.end())
         {
-            // We have it, calculate index and set
-            LodReference.Submeshes[i].MaterialIndex = UniqueMaterials[LodReference.Materials[i].MaterialName];
+            MaterialNameCounts.emplace(MaterialBaseName, 1u);
+            NewMat.MaterialName = MaterialBaseName;
         }
         else
         {
-            // Add it
-            auto& NewMat = ModelResult->AddMaterial();
-            // Assign values
-            NewMat.MaterialName = Strings::Replace(LodReference.Materials[i].MaterialName, "@", "_");
-
-            // Assign image names
-            for (auto& Image : LodReference.Materials[i].Images)
-            {
-                // Check
-                switch (Image.ImageUsage)
-                {
-                case ImageUsageType::DiffuseMap:
-                    NewMat.DiffuseMapName = Image.ImageName;
-                    break;
-                case ImageUsageType::NormalMap:
-                    NewMat.NormalMapName = Image.ImageName;
-                    break;
-                case ImageUsageType::SpecularMap:
-                    NewMat.SpecularMapName = Image.ImageName;
-                    break;
-                }
-            }
-
-            // Set
-            LodReference.Submeshes[i].MaterialIndex = (uint32_t)(UniqueMaterials.size());
-
-            // Add
-            UniqueMaterials.insert(std::make_pair(LodReference.Materials[i].MaterialName, LodReference.Submeshes[i].MaterialIndex));
+            MaterialCountEntry->second++;
+            NewMat.MaterialName = Strings::Format("%s__%u", MaterialBaseName.c_str(), MaterialCountEntry->second);
         }
+
+        // Assign image names
+        for (auto& Image : LodReference.Materials[i].Images)
+        {
+            // Check
+            switch (Image.ImageUsage)
+            {
+            case ImageUsageType::DiffuseMap:
+                NewMat.DiffuseMapName = Image.ImageName;
+                break;
+            case ImageUsageType::NormalMap:
+                NewMat.NormalMapName = Image.ImageName;
+                break;
+            case ImageUsageType::SpecularMap:
+                NewMat.SpecularMapName = Image.ImageName;
+                break;
+            }
+        }
+
+        // Set
+        LodReference.Submeshes[i].MaterialIndex = (uint32_t)(ModelResult->Materials.size() - 1);
     }
 
     // Check if we have a generic model, or a streamed one

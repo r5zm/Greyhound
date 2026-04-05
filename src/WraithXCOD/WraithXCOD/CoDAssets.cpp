@@ -88,6 +88,8 @@
 #include "GLTFExport.h"
 #include "CastExport.h"
 
+#include <unordered_set>
+
 // TODO: Use image usage/semantic hashes to determine image types instead when reading from XMaterials
 
 // -- Setup global variables
@@ -136,6 +138,8 @@ std::mutex CoDAssets::CodMutex;
 std::atomic<uint32_t> CoDAssets::ExportedAssetsCount;
 std::atomic<uint32_t> CoDAssets::AssetsToExportCount;
 std::atomic<bool> CoDAssets::CanExportContinue;
+std::unordered_set<std::string> CoDAssets::SelectedExportModelNames;
+std::vector<const CoDAnim_t*> CoDAssets::SelectedExportAnimations;
 
 // Setup export callbacks
 ExportProgressHandler CoDAssets::OnExportProgress = nullptr;
@@ -428,6 +432,7 @@ const std::vector<CoDGameProcess> CoDAssets::GameProcessInfo =
     { "t6sp.exe", SupportedGames::BlackOps2, SupportedGameFlags::SP },
     // Black Ops 3
     { "blackops3.exe", SupportedGames::BlackOps3, SupportedGameFlags::SP },
+    { "t7x.exe", SupportedGames::BlackOps3, SupportedGameFlags::SP },
     // Black Ops 4
     { "blackops4.exe", SupportedGames::BlackOps4, SupportedGameFlags::SP },
     // Black Ops CW
@@ -463,6 +468,585 @@ const std::vector<CoDGameProcess> CoDAssets::GameProcessInfo =
     { "jb_liveengine_s.exe", SupportedGames::QuantumSolace, SupportedGameFlags::SP },
 };
 
+namespace
+{
+    std::string NormalizeProcessName(std::string ProcessName)
+    {
+        Strings::ToLower(ProcessName);
+        ProcessName.erase(std::remove_if(ProcessName.begin(), ProcessName.end(), [](unsigned char Character)
+        {
+            return !std::isalnum(Character);
+        }), ProcessName.end());
+
+        return ProcessName;
+    }
+
+    bool ProcessNameStartsWithInsensitive(const std::string& ProcessName, const char* Prefix)
+    {
+        auto PrefixLength = strlen(Prefix);
+
+        return ProcessName.size() >= PrefixLength && _strnicmp(ProcessName.c_str(), Prefix, PrefixLength) == 0;
+    }
+
+    const Process* FindProcessByID(const std::vector<Process>& Processes, uint32_t ProcessID)
+    {
+        for (auto& Process : Processes)
+        {
+            if (Process.ProcessID == ProcessID)
+                return &Process;
+        }
+
+        return nullptr;
+    }
+
+    bool ProcessHasAncestorName(const std::vector<Process>& Processes, uint32_t ProcessID, const std::unordered_set<std::string>& AncestorNames)
+    {
+        auto Current = FindProcessByID(Processes, ProcessID);
+        int Depth = 0;
+
+        while (Current != nullptr && Depth < 32)
+        {
+            auto NormalizedName = NormalizeProcessName(Current->ProcessName);
+
+            if (AncestorNames.find(NormalizedName) != AncestorNames.end())
+                return true;
+
+            if (Current->ParentProcessID == 0 || Current->ParentProcessID == Current->ProcessID)
+                break;
+
+            Current = FindProcessByID(Processes, Current->ParentProcessID);
+            ++Depth;
+        }
+
+        return false;
+    }
+
+    bool ProcessMatchesGameInfo(const std::vector<Process>& Processes, const Process& Process, const std::string& ParentProcessName, const CoDGameProcess& GameInfo)
+    {
+        if (_stricmp(Process.ProcessName.c_str(), GameInfo.ProcessName) == 0)
+            return true;
+
+        // Plutonium T6 rewrites the process name at runtime and appends a revision suffix.
+        if (GameInfo.GameID == SupportedGames::BlackOps2)
+        {
+            auto NormalizedProcessName = NormalizeProcessName(Process.ProcessName);
+            auto NormalizedParentName = NormalizeProcessName(ParentProcessName);
+            auto IsPlutoniumBootstrapperChild = (NormalizedParentName == "plutoniumbootstrapperwin32exe" || NormalizedParentName == "plutoniumbootstrapperwin32");
+
+            if (GameInfo.GameFlags == SupportedGameFlags::ZM &&
+                (ProcessNameStartsWithInsensitive(Process.ProcessName, "plutonium t6 zombies") ||
+                 Strings::StartsWith(NormalizedProcessName, "plutoniumt6zombies") ||
+                 (IsPlutoniumBootstrapperChild && Strings::Contains(NormalizedProcessName, "t6") && Strings::Contains(NormalizedProcessName, "zombies"))))
+                return true;
+
+            if (GameInfo.GameFlags == SupportedGameFlags::MP &&
+                (ProcessNameStartsWithInsensitive(Process.ProcessName, "plutonium t6 multiplayer") ||
+                 Strings::StartsWith(NormalizedProcessName, "plutoniumt6multiplayer") ||
+                 (IsPlutoniumBootstrapperChild && Strings::Contains(NormalizedProcessName, "t6") && Strings::Contains(NormalizedProcessName, "multiplayer"))))
+                return true;
+        }
+
+        // T7x may show up with or without the .exe suffix depending on how the process name was surfaced.
+        if (GameInfo.GameID == SupportedGames::BlackOps3)
+        {
+            auto NormalizedProcessName = NormalizeProcessName(Process.ProcessName);
+            auto NormalizedGameProcessName = NormalizeProcessName(GameInfo.ProcessName);
+            auto NormalizedParentName = NormalizeProcessName(ParentProcessName);
+            static const std::unordered_set<std::string> T7xAncestorNames = { "t7x", "t7xexe" };
+
+            if ((NormalizedProcessName == "t7x" || NormalizedProcessName == "t7xexe") &&
+                (NormalizedGameProcessName == "t7x" || NormalizedGameProcessName == "t7xexe"))
+                return true;
+
+            if ((NormalizedGameProcessName == "t7x" || NormalizedGameProcessName == "t7xexe") &&
+                (NormalizedParentName == "t7x" || NormalizedParentName == "t7xexe" ||
+                 ProcessHasAncestorName(Processes, Process.ProcessID, T7xAncestorNames)) &&
+                (NormalizedProcessName == "game" || NormalizedProcessName == "gameexe" ||
+                 Strings::StartsWith(NormalizedProcessName, "game")))
+                return true;
+        }
+
+        return false;
+    }
+
+    uint32_t FindPlutoniumBO2Process(const std::vector<Process>& processes)
+    {
+        auto ToLower = [](std::string s)
+        {
+            std::transform(s.begin(), s.end(), s.begin(),
+                [](unsigned char c) { return (char)std::tolower(c); });
+            return s;
+        };
+
+        auto Normalize = [&](std::string s)
+        {
+            s = ToLower(s);
+            s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c)
+            {
+                return !std::isalnum(c);
+            }), s.end());
+            return s;
+        };
+
+        auto FindByPID = [&](uint32_t pid) -> const Process*
+        {
+            for (auto& p : processes)
+            {
+                if (p.ProcessID == pid)
+                    return &p;
+            }
+            return nullptr;
+        };
+
+        auto IsChildOfPlutonium = [&](uint32_t pid)
+        {
+            const Process* current = FindByPID(pid);
+            int depth = 0;
+
+            while (current && depth < 32)
+            {
+                auto name = Normalize(current->ProcessName);
+
+                if (
+                    name.find("plutonium-bootstrapper-win32") != std::string::npos ||
+                    name.find("plutoniumbootstrapperwin32") != std::string::npos ||
+                    name.find("plutoniumbootstrapper") != std::string::npos
+                )
+                    return true;
+
+                if (current->ParentProcessID == 0 || current->ParentProcessID == current->ProcessID)
+                    break;
+
+                current = FindByPID(current->ParentProcessID);
+                ++depth;
+            }
+
+            return false;
+        };
+
+        for (auto& proc : processes)
+        {
+            std::string name = proc.ProcessName;
+            Strings::ToLower(name);
+
+            if (name == "plutonium-bootstrapper-win32.exe")
+            {
+                return proc.ProcessID;
+            }
+        }
+
+        return 0;
+    }
+
+    std::string NormalizeAnimModelMatchName(std::string value)
+    {
+        Strings::ToLower(value);
+
+        for (auto& c : value)
+        {
+            if (!std::isalnum((unsigned char)c))
+                c = '_';
+        }
+
+        while (Strings::Contains(value, "__"))
+            value = Strings::Replace(value, "__", "_");
+
+        return value;
+    }
+
+    std::string CanonicalAnimModelToken(std::string token)
+    {
+        if (token == "zombie" || token == "zombies")
+            return "zm";
+
+        if (token == "multiplayer")
+            return "mp";
+
+        if (token == "singleplayer")
+            return "sp";
+
+        if (token == "viewmodel")
+            return "vm";
+
+        return token;
+    }
+
+    bool ShouldIgnoreAnimModelToken(const std::string& token)
+    {
+        static const std::unordered_set<std::string> ignored =
+        {
+            "", "o", "x", "t6", "p6", "p7", "p8", "anim", "anims", "model", "models", "prop", "char", "character"
+        };
+
+        if (ignored.find(token) != ignored.end())
+            return true;
+
+        if (token.size() <= 1 && token != "v" && token != "l")
+            return true;
+
+        if (token.size() == 4 && Strings::StartsWith(token, "lod") && Strings::IsDigits(token.substr(3)))
+            return true;
+
+        return false;
+    }
+
+    std::vector<std::string> TokenizeAnimModelMatchName(const std::string& value)
+    {
+        auto normalized = NormalizeAnimModelMatchName(value);
+        auto split = Strings::SplitString(normalized, '_', true);
+        std::vector<std::string> tokens;
+        tokens.reserve(split.size());
+
+        for (auto& part : split)
+        {
+            auto token = CanonicalAnimModelToken(part);
+
+            if (!ShouldIgnoreAnimModelToken(token))
+                tokens.emplace_back(token);
+        }
+
+        return tokens;
+    }
+
+    int ScoreAnimModelMatch(const std::string& animationName, const std::string& modelName)
+    {
+        auto normalizedAnim = NormalizeAnimModelMatchName(animationName);
+        auto normalizedModel = NormalizeAnimModelMatchName(modelName);
+
+        if (normalizedAnim == normalizedModel)
+            return 10000;
+
+        if (Strings::StartsWith(normalizedAnim, normalizedModel) || Strings::StartsWith(normalizedModel, normalizedAnim))
+            return 5000;
+
+        auto animTokens = TokenizeAnimModelMatchName(animationName);
+        auto modelTokens = TokenizeAnimModelMatchName(modelName);
+
+        if (animTokens.empty() || modelTokens.empty())
+            return 0;
+
+        std::unordered_set<std::string> modelTokenSet(modelTokens.begin(), modelTokens.end());
+
+        int shared = 0;
+        int orderedRun = 0;
+        int bestOrderedRun = 0;
+        size_t searchIndex = 0;
+
+        for (const auto& token : animTokens)
+        {
+            if (modelTokenSet.find(token) != modelTokenSet.end())
+            {
+                shared++;
+
+                auto found = std::find(modelTokens.begin() + searchIndex, modelTokens.end(), token);
+                if (found != modelTokens.end())
+                {
+                    orderedRun++;
+                    searchIndex = (size_t)std::distance(modelTokens.begin(), found) + 1;
+                }
+                else
+                {
+                    bestOrderedRun = std::max(bestOrderedRun, orderedRun);
+                    orderedRun = 1;
+                    auto resetFound = std::find(modelTokens.begin(), modelTokens.end(), token);
+                    searchIndex = (resetFound != modelTokens.end()) ? ((size_t)std::distance(modelTokens.begin(), resetFound) + 1) : 0;
+                }
+            }
+            else
+            {
+                bestOrderedRun = std::max(bestOrderedRun, orderedRun);
+                orderedRun = 0;
+                searchIndex = 0;
+            }
+        }
+
+        bestOrderedRun = std::max(bestOrderedRun, orderedRun);
+
+        if (shared == 0)
+            return 0;
+
+        return (shared * 100) + (bestOrderedRun * 25) - (int)std::abs((int)animTokens.size() - (int)modelTokens.size());
+    }
+
+    const CoDModel_t* FindBestMatchingAnimationModel(const std::string& animationName,
+                                                     const std::vector<CoDAsset_t*>& loadedAssets,
+                                                     const std::unordered_set<std::string>& preferredModelNames,
+                                                     int& bestScore,
+                                                     bool& matchedPreferredModel)
+    {
+        const CoDModel_t* foundModel = nullptr;
+        bestScore = 0;
+        matchedPreferredModel = false;
+
+        auto tryMatchModels = [&](bool preferredOnly)
+        {
+            for (auto& asset : loadedAssets)
+            {
+                if (asset->AssetType != WraithAssetType::Model)
+                    continue;
+
+                auto model = (CoDModel_t*)asset;
+                bool isPreferredModel = preferredModelNames.find(model->AssetName) != preferredModelNames.end();
+
+                if (preferredOnly && !isPreferredModel)
+                    continue;
+
+                if (!preferredOnly && isPreferredModel)
+                    continue;
+
+                int score = ScoreAnimModelMatch(animationName, model->AssetName);
+                if (score > bestScore)
+                {
+                    foundModel = model;
+                    bestScore = score;
+                    matchedPreferredModel = isPreferredModel;
+                }
+            }
+        };
+
+        if (!preferredModelNames.empty())
+            tryMatchModels(true);
+
+        if (foundModel == nullptr)
+            tryMatchModels(false);
+
+        return foundModel;
+    }
+
+    uint32_t AppendMatchedAnimationsForSelectedModels(std::vector<CoDAsset_t*>& assetsToExport,
+                                                      const std::vector<CoDAsset_t*>& loadedAssets)
+    {
+        bool hasSelectedAnimation = false;
+        std::unordered_set<std::string> selectedModelNames;
+        std::unordered_set<const CoDAsset_t*> queuedAssets(assetsToExport.begin(), assetsToExport.end());
+
+        for (auto& asset : assetsToExport)
+        {
+            if (asset->AssetType == WraithAssetType::Animation)
+                hasSelectedAnimation = true;
+            else if (asset->AssetType == WraithAssetType::Model)
+                selectedModelNames.emplace(((CoDModel_t*)asset)->AssetName);
+        }
+
+        if (hasSelectedAnimation || selectedModelNames.empty())
+            return 0;
+
+        uint32_t appendedAnimations = 0;
+
+        for (auto& asset : loadedAssets)
+        {
+            if (asset->AssetType != WraithAssetType::Animation || queuedAssets.find(asset) != queuedAssets.end())
+                continue;
+
+            int bestScore = 0;
+            bool matchedPreferredModel = false;
+            auto matchedModel = FindBestMatchingAnimationModel(asset->AssetName, loadedAssets, selectedModelNames, bestScore, matchedPreferredModel);
+
+            if (matchedModel == nullptr || !matchedPreferredModel)
+                continue;
+
+            assetsToExport.emplace_back(asset);
+            queuedAssets.emplace(asset);
+            appendedAnimations++;
+
+            if (CoDAssets::Log != nullptr)
+                CoDAssets::Log->info("Queued anim '{}' for selected model '{}' with score {}", asset->AssetName, matchedModel->AssetName, bestScore);
+        }
+
+        return appendedAnimations;
+    }
+
+    struct SourceStudioSequence
+    {
+        std::string Name;
+        std::string RelativeSmdPath;
+        float FrameRate;
+    };
+
+    std::string NormalizeSourcePath(std::string path)
+    {
+        for (auto& character : path)
+        {
+            if (character == '\\')
+                character = '/';
+        }
+
+        return path;
+    }
+
+    std::string BuildSourceMaterialFolderName(const WraithModel& model)
+    {
+        return model.AssetName + "_materials";
+    }
+
+    std::string StripModelImagePrefix(const std::string& texturePath)
+    {
+        if (Strings::IsNullOrWhiteSpace(texturePath))
+            return "";
+
+        auto normalizedPath = NormalizeSourcePath(texturePath);
+
+        while (Strings::StartsWith(normalizedPath, "./"))
+            normalizedPath = normalizedPath.substr(2);
+
+        while (Strings::StartsWith(normalizedPath, "../"))
+            normalizedPath = normalizedPath.substr(3);
+
+        if (Strings::StartsWith(normalizedPath, "_images/"))
+            normalizedPath = normalizedPath.substr(8);
+
+        return normalizedPath;
+    }
+
+    std::string BuildSourceTextureReference(const std::string& materialFolderName, const std::string& texturePath)
+    {
+        auto relativePath = StripModelImagePrefix(texturePath);
+        if (Strings::IsNullOrWhiteSpace(relativePath))
+            return "";
+
+        return NormalizeSourcePath(materialFolderName + "/" + FileSystems::GetFileNameWithoutExtension(relativePath));
+    }
+
+    void StageMaterialTexture(const std::string& modelExportPath, const std::string& materialOutputPath, const std::string& texturePath)
+    {
+        if (Strings::IsNullOrWhiteSpace(texturePath))
+            return;
+
+        auto sourcePath = texturePath;
+        if (!FileSystems::IsPathRooted(sourcePath))
+            sourcePath = FileSystems::CombinePath(modelExportPath, texturePath);
+
+        if (!FileSystems::FileExists(sourcePath))
+        {
+            if (CoDAssets::Log != nullptr)
+                CoDAssets::Log->warn("Source material texture '{}' was not found while staging Source materials", sourcePath);
+            return;
+        }
+
+        auto relativePath = StripModelImagePrefix(texturePath);
+        if (Strings::IsNullOrWhiteSpace(relativePath))
+            relativePath = FileSystems::GetFileName(texturePath);
+
+        auto destinationPath = FileSystems::CombinePath(materialOutputPath, relativePath);
+        FileSystems::CreateDirectory(FileSystems::GetDirectoryName(destinationPath));
+
+        if (!FileSystems::FileExists(destinationPath))
+            FileSystems::CopyFile(sourcePath, destinationPath);
+    }
+
+    std::vector<SourceStudioSequence> CollectSourceStudioSequencesForModel(const CoDModel_t* modelAsset,
+                                                                          const std::vector<const CoDAnim_t*>& queuedAnimations,
+                                                                          const std::unordered_set<std::string>& preferredModelNames)
+    {
+        std::vector<SourceStudioSequence> sequences;
+
+        if (queuedAnimations.empty())
+            return sequences;
+
+        for (auto& animation : queuedAnimations)
+        {
+            int bestScore = 0;
+            bool matchedPreferredModel = false;
+            auto matchedModel = FindBestMatchingAnimationModel(animation->AssetName,
+                                                               CoDAssets::GameAssets->LoadedAssets,
+                                                               preferredModelNames,
+                                                               bestScore,
+                                                               matchedPreferredModel);
+
+            if (matchedModel == nullptr || matchedModel != modelAsset || bestScore <= 0)
+                continue;
+
+            SourceStudioSequence sequence;
+            sequence.Name = animation->AssetName;
+            sequence.RelativeSmdPath = NormalizeSourcePath(FileSystems::CombinePath("..\\..\\xanims", animation->AssetName + ".smd"));
+            sequence.FrameRate = (animation->Framerate > 0.0f) ? animation->Framerate : 30.0f;
+
+            sequences.emplace_back(std::move(sequence));
+        }
+
+        std::sort(sequences.begin(), sequences.end(), [](const SourceStudioSequence& lhs, const SourceStudioSequence& rhs)
+        {
+            return lhs.Name < rhs.Name;
+        });
+
+        sequences.erase(std::unique(sequences.begin(), sequences.end(), [](const SourceStudioSequence& lhs, const SourceStudioSequence& rhs)
+        {
+            return lhs.Name == rhs.Name;
+        }), sequences.end());
+
+        return sequences;
+    }
+
+    void ExportSourceStudioMaterials(const WraithModel& model, const std::string& modelExportPath, const std::string& materialFolderName)
+    {
+        auto materialOutputPath = FileSystems::CombinePath(modelExportPath, materialFolderName);
+        FileSystems::CreateDirectory(materialOutputPath);
+
+        if (model.Materials.empty())
+            return;
+
+        for (const auto& material : model.Materials)
+        {
+            auto materialName = Strings::IsNullOrWhiteSpace(material.MaterialName) ? WraithMaterial::DefaultMaterial.MaterialName : material.MaterialName;
+            auto diffuseTexture = BuildSourceTextureReference(materialFolderName, material.DiffuseMapName);
+            auto normalTexture = BuildSourceTextureReference(materialFolderName, material.NormalMapName);
+            auto specularTexture = BuildSourceTextureReference(materialFolderName, material.SpecularMapName);
+
+            StageMaterialTexture(modelExportPath, materialOutputPath, material.DiffuseMapName);
+            StageMaterialTexture(modelExportPath, materialOutputPath, material.NormalMapName);
+            StageMaterialTexture(modelExportPath, materialOutputPath, material.SpecularMapName);
+
+            TextWriter writer;
+            writer.Create(FileSystems::CombinePath(materialOutputPath, materialName + ".vmt"));
+
+            writer.WriteLine("\"VertexLitGeneric\"");
+            writer.WriteLine("{");
+            writer.WriteLineFmt("\t\"$basetexture\" \"%s\"", diffuseTexture.empty() ? "models/debug/debugwhite" : diffuseTexture.c_str());
+
+            if (!normalTexture.empty())
+                writer.WriteLineFmt("\t\"$bumpmap\" \"%s\"", normalTexture.c_str());
+
+            if (!specularTexture.empty())
+            {
+                writer.WriteLine("\t\"$phong\" \"1\"");
+                writer.WriteLineFmt("\t\"$envmapmask\" \"%s\"", specularTexture.c_str());
+            }
+
+            writer.WriteLine("}");
+        }
+    }
+
+    void ExportSourceStudioQC(const CoDModel_t* sourceModel,
+                              const WraithModel& model,
+                              const std::string& modelExportPath,
+                              const std::vector<const CoDAnim_t*>& queuedAnimations,
+                              const std::unordered_set<std::string>& preferredModelNames)
+    {
+        auto qcPath = FileSystems::CombinePath(modelExportPath, model.AssetName + ".qc");
+        auto smdLeafName = model.AssetName + ".smd";
+        auto mdlLeafName = model.AssetName + ".mdl";
+        auto materialFolderName = BuildSourceMaterialFolderName(model);
+        auto sequences = CollectSourceStudioSequencesForModel(sourceModel, queuedAnimations, preferredModelNames);
+
+        TextWriter writer;
+        writer.Create(qcPath);
+
+        writer.WriteLineFmt("$modelname \"%s\"", mdlLeafName.c_str());
+        writer.WriteLineFmt("$cdmaterials \"%s\"", NormalizeSourcePath(materialFolderName).c_str());
+        writer.WriteLine("$surfaceprop \"default\"");
+
+        if (model.BoneCount() > 0)
+            writer.WriteLine("$mostlyopaque");
+
+        writer.WriteLineFmt("$body studio \"%s\"", smdLeafName.c_str());
+        writer.WriteLineFmt("$sequence \"idle\" \"%s\" fps 30", smdLeafName.c_str());
+
+        for (const auto& sequence : sequences)
+            writer.WriteLineFmt("$sequence \"%s\" \"%s\" fps %.6g", sequence.Name.c_str(), sequence.RelativeSmdPath.c_str(), sequence.FrameRate);
+
+        ExportSourceStudioMaterials(model, modelExportPath, materialFolderName);
+    }
+}
 // -- End find game database
 
 FindGameResult CoDAssets::BeginGameMode()
@@ -513,8 +1097,11 @@ LoadGameFileResult CoDAssets::BeginGameFileMode(const std::string& FilePath)
 
 FindGameResult CoDAssets::FindGame()
 {
-    // Attempt to locate one of the supported games
+    printf("FindGame() CALLED\n");
+
+    printf("Before GetProcesses\n");
     auto Processes = Systems::GetProcesses();
+    printf("After GetProcesses\n");
     // Clear Parasyte
     ps::state = nullptr;
     // Reset it
@@ -523,15 +1110,76 @@ FindGameResult CoDAssets::FindGame()
     GameOffsetInfos.clear();
     // Clear out existing sizes
     GamePoolSizes.clear();
+    printf("Before FindPlutoniumBO2Process\n");
+    uint32_t plutoniumPID = FindPlutoniumBO2Process(Processes);
+    printf("After FindPlutoniumBO2Process: %u\n", plutoniumPID);
+
+    if (plutoniumPID != 0)
+    {
+        GameInstance = std::make_unique<ProcessReader>();
+
+        if (GameInstance->Attach(plutoniumPID))
+        {
+            printf("Plutonium PID: %u\n", plutoniumPID);
+
+            GameID = SupportedGames::BlackOps2;
+
+            // Detect ZM vs MP
+            auto proc = std::find_if(Processes.begin(), Processes.end(),
+                [&](const Process& p) { return p.ProcessID == plutoniumPID; });
+
+            if (proc != Processes.end())
+            {
+                std::string name = proc->ProcessName;
+                Strings::ToLower(name);
+
+                if (Strings::Contains(name, "zombies"))
+                    GameFlags = SupportedGameFlags::ZM;
+                else if (Strings::Contains(name, "multiplayer"))
+                    GameFlags = SupportedGameFlags::MP;
+                else
+                    GameFlags = SupportedGameFlags::None;
+
+                printf("Attached to: %s\n", proc->ProcessName.c_str());
+            }
+
+            if (LocateGameInfo())
+            {
+                printf("LocateGameInfo SUCCESS\n");
+                return FindGameResult::Success;
+            }
+            else
+            {
+                printf("LocateGameInfo FAILED\n");
+                return FindGameResult::FailedToLocateInfo;
+            }
+        }
+        else
+        {
+            printf("Attach FAILED\n");
+            GameInstance.reset();
+        }
+    }
 
     // Loop and check
     for (auto& Process : Processes)
     {
+        auto ParentProcess = FindProcessByID(Processes, Process.ParentProcessID);
+        auto ParentProcessName = (ParentProcess != nullptr) ? ParentProcess->ProcessName : "";
+        auto LowerProcessName = Process.ProcessName;
+        Strings::ToLower(LowerProcessName);
+
+        if (CoDAssets::Log != nullptr && Strings::Contains(LowerProcessName, "plutonium"))
+            CoDAssets::Log->info("Observed process '{}' (parent '{}')", Process.ProcessName, ParentProcessName);
+
+        if (CoDAssets::Log != nullptr && (Strings::Contains(LowerProcessName, "t7") || Strings::Contains(LowerProcessName, "game")))
+            CoDAssets::Log->info("Observed BO3 candidate process '{}' (parent '{}')", Process.ProcessName, ParentProcessName);
+
         // Loop over game process info
         for (auto& GameInfo : GameProcessInfo)
         {
             // Compare name
-            if (_stricmp(Process.ProcessName.c_str(), GameInfo.ProcessName) == 0)
+            if (ProcessMatchesGameInfo(Processes, Process, ParentProcessName, GameInfo))
             {
                 // Make a new game instance
                 GameInstance = std::make_unique<ProcessReader>();
@@ -1029,6 +1677,7 @@ ExportGameResult CoDAssets::ExportAsset(const CoDAsset_t* Asset)
 
 std::unique_ptr<WraithModel> CoDAssets::GetModelForPreview(const CoDModel_t* Model)
 {
+    printf("GetModelForPreview called for %s\n", Model->AssetName.c_str());
     // Attempt to load the model
     auto GenericModel = CoDAssets::LoadGenericModelAsset(Model);
 
@@ -1424,6 +2073,53 @@ ExportGameResult CoDAssets::ExportAnimationAsset(const CoDAnim_t* Animation, con
                 // Export a SEAnim
                 SEAnim::ExportSEAnim(*Result.get(), FileSystems::CombinePath(ExportPath, Result->AssetName + ".seanim"));
             }
+            // Check for SMD format
+            if (SettingsManager::GetSetting("export_smd") == "true")
+            {
+                std::string smdPath = FileSystems::CombinePath(ExportPath, Result->AssetName + ".smd");
+
+                int bestScore = 0;
+                bool matchedSelectedModel = false;
+                const CoDModel_t* FoundModel = FindBestMatchingAnimationModel(Result->AssetName,
+                                                                              CoDAssets::GameAssets->LoadedAssets,
+                                                                              CoDAssets::SelectedExportModelNames,
+                                                                              bestScore,
+                                                                              matchedSelectedModel);
+
+                if (FoundModel != nullptr && CoDAssets::Log != nullptr)
+                {
+                    if (matchedSelectedModel)
+                        CoDAssets::Log->info("Matched anim '{}' to selected model '{}' with score {}", Result->AssetName, FoundModel->AssetName, bestScore);
+                    else
+                        CoDAssets::Log->info("Matched anim '{}' to model '{}' with score {}", Result->AssetName, FoundModel->AssetName, bestScore);
+                }
+
+                if (FoundModel != nullptr)
+                {
+                    auto RefModel = CoDAssets::GetModelForPreview(FoundModel);
+
+                    if (RefModel != nullptr && RefModel->Bones.size() > 0)
+                    {
+                        ValveSMD::ExportSMD(*Result.get(), *RefModel.get(), smdPath);
+                    }
+                    else
+                    {
+                        if (CoDAssets::Log != nullptr)
+                            CoDAssets::Log->warn("SMD anim '{}' fell back to dummy export because preview model '{}' had no bones", Result->AssetName, FoundModel->AssetName);
+
+                        // fallback
+                        ValveSMD::ExportSMD(*Result.get(), smdPath);
+                    }
+                }
+                else
+                {
+                    if (CoDAssets::Log != nullptr)
+                        CoDAssets::Log->warn("SMD anim '{}' fell back to dummy export because no matching model was found", Result->AssetName);
+
+                    // fallback if no model found
+                    ValveSMD::ExportSMD(*Result.get(), smdPath);
+                }
+            }
             // Check for Cast format
             if (SettingsManager::GetSetting("export_castanim") == "true")
             {
@@ -1497,6 +2193,9 @@ bool CoDAssets::ShouldExportAnim(std::string ExportPath)
     if (SettingsManager::GetSetting("export_seanim") == "true" && !FileSystems::FileExists(ExportPath + ".seanim"))
         Result = true;
     // Check it
+    if (SettingsManager::GetSetting("export_smd") == "true" && !FileSystems::FileExists(ExportPath + ".smd"))
+        Result = true;
+    // Check it
     if (SettingsManager::GetSetting("export_castanim") == "true" && !FileSystems::FileExists(ExportPath + ".cast"))
         Result = true;
 
@@ -1520,7 +2219,7 @@ bool CoDAssets::ShouldExportModel(std::string ExportPath)
     if (SettingsManager::GetSetting("export_xmexport") == "true" && !FileSystems::FileExists(ExportPath + ".XMODEL_EXPORT"))
         Result = true;
     // Check it
-    if (SettingsManager::GetSetting("export_smd") == "true" && !FileSystems::FileExists(ExportPath + ".smd"))
+    if (SettingsManager::GetSetting("export_smd") == "true" && (!FileSystems::FileExists(ExportPath + ".smd") || !FileSystems::FileExists(ExportPath + ".qc") || !FileSystems::DirectoryExists(ExportPath + "_materials")))
         Result = true;
     // Check it
     if (SettingsManager::GetSetting("export_obj") == "true" && !FileSystems::FileExists(ExportPath + ".obj"))
@@ -1653,7 +2352,7 @@ ExportGameResult CoDAssets::ExportModelAsset(const CoDModel_t* Model, const std:
                     if (Result != nullptr)
                     {
                         // Send off to exporter
-                        ExportWraithModel(Result, ExportPath);
+                        ExportWraithModel(Model, Result, ExportPath);
                     }
                     else
                     {
@@ -1693,7 +2392,7 @@ ExportGameResult CoDAssets::ExportModelAsset(const CoDModel_t* Model, const std:
                     if (Result != nullptr)
                     {
                         // Send off to exporter
-                        ExportWraithModel(Result, ExportPath);
+                        ExportWraithModel(Model, Result, ExportPath);
                     }
                     else
                     {
@@ -1726,7 +2425,7 @@ ExportGameResult CoDAssets::ExportModelAsset(const CoDModel_t* Model, const std:
             {
                 // Export it
                 Result->AssetName += "_HITBOX";
-                ExportWraithModel(Result, ExportPath);
+                ExportWraithModel(nullptr, Result, ExportPath);
             }
         }
     }
@@ -2052,7 +2751,7 @@ ExportGameResult CoDAssets::ExportMaterialAsset(const CoDMaterial_t* Material, c
     return ExportGameResult::Success;
 }
 
-void CoDAssets::ExportWraithModel(const std::unique_ptr<WraithModel>& Model, const std::string& ExportPath)
+void CoDAssets::ExportWraithModel(const CoDModel_t* SourceModel, const std::unique_ptr<WraithModel>& Model, const std::string& ExportPath)
 {
     // Write Cosmetic List
     TextWriter Cosmetics;
@@ -2085,6 +2784,9 @@ void CoDAssets::ExportWraithModel(const std::unique_ptr<WraithModel>& Model, con
     {
         // Export a SMD file
         ValveSMD::ExportSMD(*Model.get(), FileSystems::CombinePath(ExportPath, Model->AssetName + ".smd"));
+
+        if (SourceModel != nullptr)
+            ExportSourceStudioQC(SourceModel, *Model.get(), ExportPath, SelectedExportAnimations, SelectedExportModelNames);
     }
 
     // The following formats are scaled
@@ -2292,6 +2994,11 @@ void CoDAssets::ExportMaterialImages(const XMaterial_t& Material, const std::str
     {
         // Grab the full image path, if it doesn't exist convert it!
         auto FullImagePath = FileSystems::CombinePath(ImagesPath, Image.ImageName + ImageExtension);
+        auto FullImageDirectory = FileSystems::GetDirectoryName(FullImagePath);
+        if (!Strings::IsNullOrWhiteSpace(FullImageDirectory))
+        {
+            FileSystems::CreateDirectory(FullImageDirectory);
+        }
         // Check if we want to skip previous images
         auto SkipPrevImages = SettingsManager::GetSetting("skipprevimg") == "true";
         // Check if it exists
@@ -2312,20 +3019,41 @@ void CoDAssets::ExportMaterialImages(const XMaterial_t& Material, const std::str
                         // Just write the buffer
                         auto Writer = BinaryWriter();
                         // Make the file
-                        Writer.Create(FullImagePath);
-                        // Write the DDS buffer
-                        Writer.Write((const int8_t*)ImageData->DataBuffer, ImageData->DataSize);
+                        if (Writer.Create(FullImagePath))
+                        {
+                            // Write the DDS buffer
+                            Writer.Write((const int8_t*)ImageData->DataBuffer, ImageData->DataSize);
+                        }
+                        else if (CoDAssets::Log != nullptr)
+                        {
+                            CoDAssets::Log->warn("Failed to create image file '{}' for material '{}'", FullImagePath, Material.MaterialName);
+                        }
                     }
                     catch (...)
                     {
-                        // Nothing, this means that something is already accessing the image
+                        if (CoDAssets::Log != nullptr)
+                        {
+                            CoDAssets::Log->warn("Failed to write DDS image '{}' for material '{}'", FullImagePath, Material.MaterialName);
+                        }
                     }
                 }
                 else
                 {
                     // Convert it, this method is a nothrow
-                    Image::ConvertImageMemory(ImageData->DataBuffer, ImageData->DataSize, ImageFormat::DDS_WithHeader, FullImagePath, ImageFormatType, ImageData->ImagePatchType);
+                    if (!Image::ConvertImageMemory(ImageData->DataBuffer, ImageData->DataSize, ImageFormat::DDS_WithHeader, FullImagePath, ImageFormatType, ImageData->ImagePatchType)
+                        && CoDAssets::Log != nullptr)
+                    {
+                        CoDAssets::Log->warn("Failed to convert image '{}' for material '{}'", FullImagePath, Material.MaterialName);
+                    }
                 }
+            }
+            else if (CoDAssets::Log != nullptr)
+            {
+                CoDAssets::Log->warn("Failed to load material image '{}' (usage {}, ptr 0x{:X}) for material '{}'",
+                                     Image.ImageName,
+                                     (uint32_t)Image.ImageUsage,
+                                     Image.ImagePtr,
+                                     Material.MaterialName);
             }
         }
     }
@@ -2434,6 +3162,22 @@ void CoDAssets::ExportSelectedAssets(void* Caller, const std::unique_ptr<std::ve
         }
     }
 
+    auto autoQueuedAnimations = AppendMatchedAnimationsForSelectedModels(*Assets, CoDAssets::GameAssets->LoadedAssets);
+    if (autoQueuedAnimations > 0 && CoDAssets::Log != nullptr)
+        CoDAssets::Log->info("Queued {} matching animations for the selected model export", autoQueuedAnimations);
+
+    AssetsToExportCount = (uint32_t)Assets->size();
+
+    SelectedExportModelNames.clear();
+    SelectedExportAnimations.clear();
+    for (auto& asset : *Assets)
+    {
+        if (asset->AssetType == WraithAssetType::Model)
+            SelectedExportModelNames.emplace(((CoDModel_t*)asset)->AssetName);
+        else if (asset->AssetType == WraithAssetType::Animation)
+            SelectedExportAnimations.emplace_back((CoDAnim_t*)asset);
+    }
+
     // The asset index we're on
     std::atomic<uint32_t> AssetIndex = 0;
     // The assets we need to convert
@@ -2524,4 +3268,7 @@ void CoDAssets::ExportSelectedAssets(void* Caller, const std::unique_ptr<std::ve
 
         // We are spinning up a maximum of 3 threads for conversion
     }, DegreeOfConverter);
+
+    SelectedExportModelNames.clear();
+    SelectedExportAnimations.clear();
 }

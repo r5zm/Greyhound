@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <atomic>
+#include <unordered_set>
 
 // We need the following WraithX classes
 #include "ProcessReader.h"
@@ -275,10 +276,15 @@ private:
     static void ExportMaterialImages(const XMaterial_t& Material, const std::string& ImagesPath, const std::string& ImageExtension, ImageFormat ImageFormatType);
 
     // Export a WraithModel to the various formats specified in settings
-    static void ExportWraithModel(const std::unique_ptr<WraithModel>& Model, const std::string& ExportPath);
+    static void ExportWraithModel(const CoDModel_t* SourceModel, const std::unique_ptr<WraithModel>& Model, const std::string& ExportPath);
 
     // Exports the asset in the list provided, in async
     static void ExportSelectedAssets(void* Caller, const std::unique_ptr<std::vector<CoDAsset_t*>>& Assets);
+
+    // The currently selected model asset names for the active export batch.
+    static std::unordered_set<std::string> SelectedExportModelNames;
+    // The currently queued animation assets for the active export batch.
+    static std::vector<const CoDAnim_t*> SelectedExportAnimations;
 
     // A locking mutex for proper async operations
     static std::mutex CodMutex;

@@ -35,7 +35,8 @@ void WraithUpdate::CheckForUpdates(const std::string& GithubName, const std::str
     TryCleanupTemp(TempPath);
     // Get path
     auto UpdaterPath = FileSystems::CombinePath(FileSystems::GetApplicationPath(), "GreyhoundUpdater.exe");
-    auto NewPath = FileSystems::CombinePath(TempPath, Strings::Format("GreyhoundUpdater_%llx.exe", std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now())));
+    auto TimeStamp = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now()).time_since_epoch().count();
+    auto NewPath = FileSystems::CombinePath(TempPath, Strings::Format("GreyhoundUpdater_%llx.exe", TimeStamp));
     FileSystems::CopyFile(UpdaterPath, NewPath);
 
     // Build arguments
