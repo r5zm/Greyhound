@@ -75,6 +75,7 @@
       <PreprocessorDefinitions>_UNICODE;UNICODE;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp14</LanguageStandard>
       <ExceptionHandling>Async</ExceptionHandling>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>

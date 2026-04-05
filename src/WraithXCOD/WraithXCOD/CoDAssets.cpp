@@ -671,6 +671,11 @@ namespace
         return token;
     }
 
+    // Minimum score required to consider an animation matched to a model.
+    // Prefix/exact matches score 5000+, single shared token scores ~100-125.
+    // Requiring 200 means at least two meaningful shared tokens.
+    constexpr int kMinAnimModelMatchScore = 200;
+
     bool ShouldIgnoreAnimModelToken(const std::string& token)
     {
         static const std::unordered_set<std::string> ignored =
@@ -842,7 +847,7 @@ namespace
             bool matchedPreferredModel = false;
             auto matchedModel = FindBestMatchingAnimationModel(asset->AssetName, loadedAssets, selectedModelNames, bestScore, matchedPreferredModel);
 
-            if (matchedModel == nullptr || !matchedPreferredModel)
+            if (matchedModel == nullptr || !matchedPreferredModel || bestScore < kMinAnimModelMatchScore)
                 continue;
 
             assetsToExport.emplace_back(asset);
@@ -953,7 +958,7 @@ namespace
                                                                bestScore,
                                                                matchedPreferredModel);
 
-            if (matchedModel == nullptr || matchedModel != modelAsset || bestScore <= 0)
+            if (matchedModel == nullptr || matchedModel != modelAsset || bestScore < kMinAnimModelMatchScore)
                 continue;
 
             SourceStudioSequence sequence;
@@ -1040,9 +1045,6 @@ namespace
 
         writer.WriteLineFmt("$body studio \"%s\"", smdLeafName.c_str());
         writer.WriteLineFmt("$sequence \"idle\" \"%s\" fps 30", smdLeafName.c_str());
-
-        for (const auto& sequence : sequences)
-            writer.WriteLineFmt("$sequence \"%s\" \"%s\" fps %.6g", sequence.Name.c_str(), sequence.RelativeSmdPath.c_str(), sequence.FrameRate);
 
         ExportSourceStudioMaterials(model, modelExportPath, materialFolderName);
     }
@@ -3162,9 +3164,9 @@ void CoDAssets::ExportSelectedAssets(void* Caller, const std::unique_ptr<std::ve
         }
     }
 
-    auto autoQueuedAnimations = AppendMatchedAnimationsForSelectedModels(*Assets, CoDAssets::GameAssets->LoadedAssets);
-    if (autoQueuedAnimations > 0 && CoDAssets::Log != nullptr)
-        CoDAssets::Log->info("Queued {} matching animations for the selected model export", autoQueuedAnimations);
+    // auto autoQueuedAnimations = AppendMatchedAnimationsForSelectedModels(*Assets, CoDAssets::GameAssets->LoadedAssets);
+    // if (autoQueuedAnimations > 0 && CoDAssets::Log != nullptr)
+    //     CoDAssets::Log->info("Queued {} matching animations for the selected model export", autoQueuedAnimations);
 
     AssetsToExportCount = (uint32_t)Assets->size();
 

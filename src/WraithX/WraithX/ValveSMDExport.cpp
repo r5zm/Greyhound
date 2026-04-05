@@ -196,6 +196,8 @@ namespace
             if (materialIndex >= 0 && materialIndex < (int32_t)model.Materials.size())
             {
                 const auto& material = model.Materials[(size_t)materialIndex];
+                if (!material.DiffuseMapName.empty())
+                    return material.DiffuseMapName;
                 if (!material.MaterialName.empty())
                     return material.MaterialName;
             }
@@ -254,7 +256,7 @@ namespace
             parentBone,
             vertex.Position.X, vertex.Position.Y, vertex.Position.Z,
             vertex.Normal.X, vertex.Normal.Y, vertex.Normal.Z,
-            uv.U, uv.V,
+            uv.U, 1.0f - uv.V,
             (uint32_t)links.size());
 
         for (const auto& link : links)
