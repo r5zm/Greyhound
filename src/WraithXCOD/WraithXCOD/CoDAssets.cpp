@@ -2102,23 +2102,41 @@ ExportGameResult CoDAssets::ExportAnimationAsset(const CoDAnim_t* Animation, con
 
                     if (RefModel != nullptr && RefModel->Bones.size() > 0)
                     {
-                        ValveSMD::ExportSMD(*Result.get(), *RefModel.get(), smdPath);
+                        // Validate that the reference model's bones overlap with the animation's bones
+                        auto animBones = Result->Bones();
+                        uint32_t overlapCount = 0;
+
+                        for (const auto& modelBone : RefModel->Bones)
+                        {
+                            if (animBones.find(modelBone.TagName) != animBones.end())
+                                overlapCount++;
+                        }
+
+                        if (overlapCount > 0)
+                        {
+                            ValveSMD::ExportSMD(*Result.get(), *RefModel.get(), smdPath);
+                        }
+                        else
+                        {
+                            if (CoDAssets::Log != nullptr)
+                                CoDAssets::Log->warn("SMD anim '{}' matched model '{}' but no bone names overlap, using animation bones", Result->AssetName, FoundModel->AssetName);
+
+                            ValveSMD::ExportSMD(*Result.get(), smdPath);
+                        }
                     }
                     else
                     {
                         if (CoDAssets::Log != nullptr)
-                            CoDAssets::Log->warn("SMD anim '{}' fell back to dummy export because preview model '{}' had no bones", Result->AssetName, FoundModel->AssetName);
+                            CoDAssets::Log->warn("SMD anim '{}' fell back because preview model '{}' had no bones", Result->AssetName, FoundModel->AssetName);
 
-                        // fallback
                         ValveSMD::ExportSMD(*Result.get(), smdPath);
                     }
                 }
                 else
                 {
                     if (CoDAssets::Log != nullptr)
-                        CoDAssets::Log->warn("SMD anim '{}' fell back to dummy export because no matching model was found", Result->AssetName);
+                        CoDAssets::Log->warn("SMD anim '{}' no matching model found, using animation bones", Result->AssetName);
 
-                    // fallback if no model found
                     ValveSMD::ExportSMD(*Result.get(), smdPath);
                 }
             }

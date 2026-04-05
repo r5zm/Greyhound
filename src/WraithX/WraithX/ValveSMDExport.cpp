@@ -340,7 +340,7 @@ void ValveSMD::ExportSMD(const WraithModel& Model, const std::string& FileName)
     WriteModelQC(Model, FileName);
 }
 
-// ---------- LEGACY (SAFE FALLBACK) ----------
+// ---------- FALLBACK ANIMATION EXPORT (NO REFERENCE MODEL) ----------
 
 void ValveSMD::ExportSMD(const WraithAnim& Animation, const std::string& FileName)
 {
@@ -348,13 +348,73 @@ void ValveSMD::ExportSMD(const WraithAnim& Animation, const std::string& FileNam
     writer.Create(FileName);
 
     writer.WriteLine("version 1");
+
+    // Build a flat bone list from the animation's own bone names
+    auto animBones = Animation.Bones();
+    std::vector<std::string> boneList(animBones.begin(), animBones.end());
+    std::sort(boneList.begin(), boneList.end());
+
+    // Build name-to-index lookup
+    std::unordered_map<std::string, uint32_t> boneIndexMap;
+    for (uint32_t i = 0; i < (uint32_t)boneList.size(); i++)
+        boneIndexMap[boneList[i]] = i;
+
+    if (boneList.empty())
+    {
+        // No bones at all, write minimal valid SMD
+        writer.WriteLine("nodes");
+        writer.WriteLine("0 \"root\" -1");
+        writer.WriteLine("end");
+        writer.WriteLine("skeleton");
+        writer.WriteLine("time 0");
+        writer.WriteLine("0 0 0 0 0 0 0");
+        writer.WriteLine("end");
+        return;
+    }
+
+    // Nodes - flat hierarchy, all parented to -1
     writer.WriteLine("nodes");
-    writer.WriteLine("0 \"root\" -1");
+    for (uint32_t i = 0; i < (uint32_t)boneList.size(); i++)
+        writer.WriteLineFmt("%u \"%s\" -1", i, boneList[i].c_str());
     writer.WriteLine("end");
 
+    // Skeleton
     writer.WriteLine("skeleton");
-    writer.WriteLine("time 0");
-    writer.WriteLine("0 0 0 0 0 0 0");
+
+    uint32_t frameCount = std::max<uint32_t>(Animation.FrameCount(), 1u);
+
+    for (uint32_t f = 0; f < frameCount; f++)
+    {
+        writer.WriteLineFmt("time %u", f);
+
+        for (uint32_t i = 0; i < (uint32_t)boneList.size(); i++)
+        {
+            const auto& boneName = boneList[i];
+
+            Vector3 pos(0.0f, 0.0f, 0.0f);
+            Quaternion rot = Quaternion::Identity();
+
+            auto p = Animation.AnimationPositionKeys.find(boneName);
+            if (p != Animation.AnimationPositionKeys.end())
+                pos = ResolvePos(p->second, f, Vector3(0.0f, 0.0f, 0.0f));
+
+            auto r = Animation.AnimationRotationKeys.find(boneName);
+            if (r != Animation.AnimationRotationKeys.end())
+                rot = ResolveRot(r->second, f, Quaternion::Identity());
+
+            rot = NormalizeQuat(rot);
+            Vector3 e = rot.ToEulerAngles();
+
+            writer.WriteLineFmt("%u %f %f %f %f %f %f",
+                i,
+                pos.X, pos.Y, pos.Z,
+                VectorMath::DegreesToRadians(e.X),
+                VectorMath::DegreesToRadians(e.Y),
+                VectorMath::DegreesToRadians(e.Z)
+            );
+        }
+    }
+
     writer.WriteLine("end");
 }
 
