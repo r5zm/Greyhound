@@ -465,14 +465,16 @@ void ValveSMD::ExportSMD(const WraithAnim& Animation,
 
             if (boneMode == WraithAnimationType::Absolute)
             {
+                // Absolute: keys are global-space transforms
                 if (p != Animation.AnimationPositionKeys.end())
                     pose.GlobalPosition = ResolvePos(p->second, f, bone.GlobalPosition);
 
                 if (r != Animation.AnimationRotationKeys.end())
                     pose.GlobalRotation = ResolveRot(r->second, f, bone.GlobalRotation);
             }
-            else
+            else if (boneMode == WraithAnimationType::Additive)
             {
+                // Additive: keys are deltas from rest pose
                 if (p != Animation.AnimationPositionKeys.end())
                     pose.LocalPosition = bone.LocalPosition + ResolvePos(p->second, f, Vector3(0.0f, 0.0f, 0.0f));
 
@@ -481,6 +483,27 @@ void ValveSMD::ExportSMD(const WraithAnim& Animation,
                     Quaternion deltaRotation = ResolveRot(r->second, f, Quaternion::Identity());
                     pose.LocalRotation = NormalizeQuat(bone.LocalRotation * deltaRotation);
                 }
+
+                if (bone.BoneParent >= 0 && bone.BoneParent < (int32_t)framePoses.size())
+                {
+                    const auto& parentPose = framePoses[(size_t)bone.BoneParent];
+                    pose.GlobalRotation = NormalizeQuat(parentPose.GlobalRotation * pose.LocalRotation);
+                    pose.GlobalPosition = parentPose.GlobalPosition + RotateVector(pose.LocalPosition, parentPose.GlobalRotation);
+                }
+                else
+                {
+                    pose.GlobalPosition = pose.LocalPosition;
+                    pose.GlobalRotation = pose.LocalRotation;
+                }
+            }
+            else
+            {
+                // Relative/Delta: keys ARE the final local-space transforms
+                if (p != Animation.AnimationPositionKeys.end())
+                    pose.LocalPosition = ResolvePos(p->second, f, bone.LocalPosition);
+
+                if (r != Animation.AnimationRotationKeys.end())
+                    pose.LocalRotation = NormalizeQuat(ResolveRot(r->second, f, bone.LocalRotation));
 
                 if (bone.BoneParent >= 0 && bone.BoneParent < (int32_t)framePoses.size())
                 {
