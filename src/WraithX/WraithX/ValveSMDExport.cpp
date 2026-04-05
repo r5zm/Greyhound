@@ -196,8 +196,6 @@ namespace
             if (materialIndex >= 0 && materialIndex < (int32_t)model.Materials.size())
             {
                 const auto& material = model.Materials[(size_t)materialIndex];
-                if (!material.DiffuseMapName.empty())
-                    return material.DiffuseMapName;
                 if (!material.MaterialName.empty())
                     return material.MaterialName;
             }
